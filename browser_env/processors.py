@@ -1118,6 +1118,12 @@ class ImageObservationProcessor(ObservationProcessor):
 
         self.browser_config = browser_info["config"]
 
+        # Wait for in-flight network requests (lazy-loaded images) to settle.
+        try:
+            page.wait_for_load_state("networkidle", timeout=2000)
+        except Exception:
+            pass
+
         if self.observation_type == "image_som":
             # Produce the SoM image, with bounding boxes
             try:
