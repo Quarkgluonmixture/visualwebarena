@@ -141,7 +141,8 @@ class ScriptBrowserEnv(Env[dict[str, Observation], Action]):
         self.context_manager = sync_playwright()
         self.playwright = self.context_manager.__enter__()
         self.browser = self.playwright.chromium.launch(
-            headless=self.headless, slow_mo=self.slow_mo
+            headless=self.headless, slow_mo=self.slow_mo,
+            args=["--host-resolver-rules=MAP metis.lti.cs.cmu.edu 100.95.81.103"],
         )
 
         if config_file:

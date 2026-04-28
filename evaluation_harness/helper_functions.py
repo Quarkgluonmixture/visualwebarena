@@ -1,5 +1,6 @@
 """Implements helper functions to assist evaluation cases where other evaluators are not suitable."""
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any, Union
 from urllib.parse import urlparse
@@ -592,8 +593,14 @@ def llm_fuzzy_match(pred: str, reference: str, question: str) -> float:
         {"role": "user", "content": message},
     ]
 
+    eval_model = (
+        os.environ.get("VWA_EVAL_MODEL")
+        or os.environ.get("OPENAI_EVAL_MODEL")
+        or "gpt-4o-mini"
+    )
+
     response = generate_from_openai_chat_completion(
-        model="gpt-4-1106-preview",
+        model=eval_model,
         messages=messages,
         temperature=0,
         max_tokens=768,
@@ -602,9 +609,11 @@ def llm_fuzzy_match(pred: str, reference: str, question: str) -> float:
     ).lower()
     if "partially correct" in response or "incorrect" in response:
         return 0.0
-    else:
-        assert "correct" in response, response
+    elif "correct" in response:
         return 1.0
+    else:
+        # Unexpected response (e.g. "n/a") — treat as incorrect
+        return 0.0
 
 
 def llm_ua_match(pred: str, reference: str, question: str) -> float:
@@ -627,8 +636,14 @@ def llm_ua_match(pred: str, reference: str, question: str) -> float:
         {"role": "user", "content": message},
     ]
 
+    eval_model = (
+        os.environ.get("VWA_EVAL_MODEL")
+        or os.environ.get("OPENAI_EVAL_MODEL")
+        or "gpt-4o-mini"
+    )
+
     response = generate_from_openai_chat_completion(
-        model="gpt-4-1106-preview",
+        model=eval_model,
         messages=messages,
         temperature=0,
         max_tokens=768,
@@ -637,6 +652,8 @@ def llm_ua_match(pred: str, reference: str, question: str) -> float:
     ).lower()
     if "different" in response:
         return 0.0
-    else:
-        assert "same" in response
+    elif "same" in response:
         return 1.0
+    else:
+        # Unexpected response — treat as different
+        return 0.0

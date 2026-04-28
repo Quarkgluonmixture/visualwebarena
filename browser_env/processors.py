@@ -215,7 +215,7 @@ class TextObervationProcessor(ObservationProcessor):
         )
 
         # Compute the overlap area
-        ratio = overlap_width * overlap_height / width * height
+        ratio = (overlap_width * overlap_height) / (width * height)
         return ratio
 
     def fetch_page_html(

@@ -937,7 +937,7 @@ def execute_mouse_hover(left: float, top: float, page: Page) -> None:
     viewport_size = page.viewport_size
     assert viewport_size
     page.mouse.move(
-        left * viewport_size["width"], top * viewport_size["height"]
+        float(left * viewport_size["width"]), float(top * viewport_size["height"])
     )
 
 
@@ -955,8 +955,10 @@ def execute_mouse_click(left: float, top: float, page: Page) -> None:
     """Click at coordinates (left, top)."""
     viewport_size = page.viewport_size
     assert viewport_size
+    # Ensure Python float for Playwright JSON serialization (np.float32 is not
+    # JSON-serializable and causes silent failures with NumPy >=2.0 type promotion).
     page.mouse.click(
-        left * viewport_size["width"], top * viewport_size["height"]
+        float(left * viewport_size["width"]), float(top * viewport_size["height"])
     )
 
 
@@ -966,7 +968,7 @@ async def aexecute_mouse_click(left: float, top: float, page: APage) -> None:
     viewport_size = page.viewport_size
     assert viewport_size
     await page.mouse.click(
-        left * viewport_size["width"], top * viewport_size["height"]
+        float(left * viewport_size["width"]), float(top * viewport_size["height"])
     )
 
 
@@ -976,7 +978,7 @@ def execute_upload(left: float, top: float, path: str, page: Page) -> None:
     assert viewport_size
     with page.expect_file_chooser() as fc_info:
         page.mouse.click(
-            left * viewport_size["width"], top * viewport_size["height"]
+            float(left * viewport_size["width"]), float(top * viewport_size["height"])
         )
     file_chooser = fc_info.value
     file_chooser.set_files(path)
@@ -1341,18 +1343,25 @@ def execute_action(
                 element_id = action["element_id"]
                 element_center = obseration_processor.get_element_center(element_id)  # type: ignore[attr-defined]
                 execute_mouse_click(element_center[0], element_center[1], page)
+                execute_key_press("Meta+A", page)
+                execute_key_press("Backspace", page)
                 execute_type(action["text"], page)
             elif action["element_role"] and action["element_name"]:
                 element_role = int(action["element_role"])
                 element_name = action["element_name"]
                 nth = action["nth"]
                 execute_focus(element_role, element_name, nth, page)
+                execute_key_press("Meta+A", page)
+                execute_key_press("Backspace", page)
                 execute_type(action["text"], page)
             elif action["pw_code"]:
                 parsed_code = parse_playwright_code(action["pw_code"])
                 locator_code = parsed_code[:-1]
                 text = parsed_code[-1]["arguments"][0]
                 # [shuyanzh], don't support action args and kwargs now
+                execute_playwright_click(locator_code=locator_code, page=page)
+                execute_key_press("Meta+A", page)
+                execute_key_press("Backspace", page)
                 execute_playwright_type(
                     text=text, locator_code=locator_code, page=page
                 )
@@ -1494,12 +1503,19 @@ async def aexecute_action(
                 element_name = action["element_name"]
                 nth = action["nth"]
                 await aexecute_focus(element_role, element_name, nth, page)
+                await aexecute_key_press("Meta+A", page)
+                await aexecute_key_press("Backspace", page)
                 await aexecute_type(action["text"], page)
             elif action["pw_code"]:
                 parsed_code = parse_playwright_code(action["pw_code"])
                 locator_code = parsed_code[:-1]
                 text = parsed_code[-1]["arguments"][0]
                 # [shuyanzh], don't support action args and kwargs now
+                await aexecute_playwright_click(
+                    locator_code=locator_code, page=page
+                )
+                await aexecute_key_press("Meta+A", page)
+                await aexecute_key_press("Backspace", page)
                 await aexecute_playwright_type(
                     text=text, locator_code=locator_code, page=page
                 )

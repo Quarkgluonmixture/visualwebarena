@@ -12,9 +12,24 @@ import aiolimiter
 import openai
 from openai import AsyncOpenAI, OpenAI
 
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], base_url=os.environ.get("OPENAI_BASE_URL"))
-aclient = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"], base_url=os.environ.get("OPENAI_BASE_URL"))
+client: OpenAI | None = None
+aclient: AsyncOpenAI | None = None
 from tqdm.asyncio import tqdm_asyncio
+
+
+def _require_openai_clients() -> tuple[OpenAI, AsyncOpenAI]:
+    global client, aclient
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
+        )
+    base_url = os.environ.get("OPENAI_BASE_URL")
+    if client is None:
+        client = OpenAI(api_key=api_key, base_url=base_url)
+    if aclient is None:
+        aclient = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    return client, aclient
 
 
 def retry_with_exponential_backoff(  # type: ignore
@@ -74,10 +89,11 @@ async def _throttled_openai_completion_acreate(
     top_p: float,
     limiter: aiolimiter.AsyncLimiter,
 ) -> dict[str, Any]:
+    _, local_aclient = _require_openai_clients()
     async with limiter:
         for _ in range(3):
             try:
-                return await aclient.completions.create(
+                return await local_aclient.completions.create(
                     engine=engine,
                     prompt=prompt,
                     temperature=temperature,
@@ -117,10 +133,7 @@ async def agenerate_from_openai_completion(
     Returns:
         List of generated responses.
     """
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
+    _require_openai_clients()
 
     limiter = aiolimiter.AsyncLimiter(requests_per_minute)
     async_responses = [
@@ -148,12 +161,8 @@ def generate_from_openai_completion(
     context_length: int,
     stop_token: str | None = None,
 ) -> str:
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
-
-    response = client.completions.create(
+    local_client, _ = _require_openai_clients()
+    response = local_client.completions.create(
         prompt=prompt,
         engine=engine,
         temperature=temperature,
@@ -173,10 +182,11 @@ async def _throttled_openai_chat_completion_acreate(
     top_p: float,
     limiter: aiolimiter.AsyncLimiter,
 ) -> dict[str, Any]:
+    _, local_aclient = _require_openai_clients()
     async with limiter:
         for _ in range(3):
             try:
-                return await aclient.chat.completions.create(
+                return await local_aclient.chat.completions.create(
                     model=model,
                     messages=messages,
                     temperature=temperature,
@@ -219,10 +229,7 @@ async def agenerate_from_openai_chat_completion(
     Returns:
         List of generated responses.
     """
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
+    _require_openai_clients()
 
     limiter = aiolimiter.AsyncLimiter(requests_per_minute)
     async_responses = [
@@ -250,11 +257,8 @@ def generate_from_openai_chat_completion(
     context_length: int,
     stop_token: str | None = None,
 ) -> str:
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
-    response = client.chat.completions.create(
+    local_client, _ = _require_openai_clients()
+    response = local_client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temperature,
