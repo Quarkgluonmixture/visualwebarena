@@ -147,3 +147,6 @@ config_files/wa/test_webarena/*
 
 cache/*
 agents/prompts/jsons/*
+# P79 — runtime / build data, not source
+environment_docker/data/
+environment_docker/classifieds_docker_compose/
