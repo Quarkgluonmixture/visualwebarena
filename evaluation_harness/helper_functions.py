@@ -580,6 +580,14 @@ def gitlab_get_project_memeber_role(
 @beartype
 def llm_fuzzy_match(pred: str, reference: str, question: str) -> float:
     """Check whether the prediction matches the reference with GPT-4-turbo"""
+    # P79 patch (master bug B-91, 2026-05-14): an empty / whitespace-only
+    # prediction is never a correct answer. When the agent never submits a real
+    # finish, VWA run.py / the P79 runner append a fake stop action with
+    # answer="" — without this gate the LLM judge can still score "" as
+    # 'correct', producing string_match false positives. Deterministic
+    # source-level fix; replaces the post-hoc eval_fp downgrade.
+    if not pred or not pred.strip():
+        return 0.0
     messages: list[dict[str, Any]] = []
     # construct the question to ask
     message = "Help a teacher to grade the answer of a student given a question. Keep in mind that the student may use different phrasing or wording to answer the question. The goal is to evaluate whether the answer is semantically equivalent to the reference answer.\n"
@@ -618,6 +626,13 @@ def llm_fuzzy_match(pred: str, reference: str, question: str) -> float:
 
 def llm_ua_match(pred: str, reference: str, question: str) -> float:
     """Check whether the prediction matches the reference with GPT-4-turbo"""
+    # P79 patch (master bug B-91, 2026-05-14): an empty / whitespace-only
+    # "reported unachievable reason" is never a valid N/A judgement. The fake
+    # stop action injected when the agent never finishes sends pred="" here —
+    # without this gate the LLM judge can score "" as 'same'. Deterministic
+    # source-level fix; replaces the post-hoc na_fp downgrade.
+    if not pred or not pred.strip():
+        return 0.0
     messages: list[dict[str, Any]] = []
     # construct the question to ask
     message = ""
