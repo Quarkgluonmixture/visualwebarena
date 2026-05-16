@@ -1118,11 +1118,11 @@ class ImageObservationProcessor(ObservationProcessor):
 
         self.browser_config = browser_info["config"]
 
-        # Wait for in-flight network requests (lazy-loaded images) to settle.
-        try:
-            page.wait_for_load_state("networkidle", timeout=2000)
-        except Exception:
-            pass
+        # P79 patch (/stress A1.18 P0-4, 2026-05-16): networkidle wait moved
+        # to ObservationHandler.get_observation as a single shared pre-observation
+        # barrier (covers BOTH text + image). The local wait that used to live
+        # here was asymmetric — text observation never waited — and the local
+        # ordering (browser_info BEFORE wait) was itself internally inconsistent.
 
         if self.observation_type == "image_som":
             # Produce the SoM image, with bounding boxes
@@ -1269,6 +1269,16 @@ class ObservationHandler:
         return spaces.Dict({"text": text_space, "image": image_space})
 
     def get_observation(self, page: Page) -> dict[str, Observation]:
+        # P79 patch (/stress A1.18 P0-4, 2026-05-16): single networkidle barrier
+        # before BOTH processors so text + image observe the same page state.
+        # Previously the wait existed only in ImageObservationProcessor.process,
+        # causing AXTree (DOM/SoM text) to be captured pre-networkidle while
+        # screenshot (Vision/SoM image) was post-networkidle — a silent
+        # cross-mode timing confound on the §1 phantom-vs-baseline claim.
+        try:
+            page.wait_for_load_state("networkidle", timeout=2000)
+        except Exception:
+            pass
         text_obs = self.text_processor.process(page)
         image_obs, content_str = self.image_processor.process(page)
         if content_str != "":

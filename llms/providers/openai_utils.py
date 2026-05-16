@@ -16,20 +16,40 @@ client: OpenAI | None = None
 aclient: AsyncOpenAI | None = None
 from tqdm.asyncio import tqdm_asyncio
 
+# /stress A1.18 P1-2 (2026-05-16): lock-protect lazy init + env-hash check.
+# Pre-fix: concurrent threads + changed OPENAI_BASE_URL could mix old/new
+# clients (last-writer-wins, local caller could hold different client than
+# the module global). Now: lock guards mutation, env-fingerprint guards
+# stale-env (api_key + base_url change forces reinit).
+import hashlib
+import threading
+_clients_lock = threading.Lock()
+_clients_env_fingerprint: str | None = None
+
+
+def _env_fingerprint(api_key: str, base_url: str | None) -> str:
+    h = hashlib.sha256()
+    h.update((api_key or "").encode("utf-8"))
+    h.update(b"|")
+    h.update((base_url or "").encode("utf-8"))
+    return h.hexdigest()
+
 
 def _require_openai_clients() -> tuple[OpenAI, AsyncOpenAI]:
-    global client, aclient
+    global client, aclient, _clients_env_fingerprint
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise ValueError(
             "OPENAI_API_KEY environment variable must be set when using OpenAI API."
         )
     base_url = os.environ.get("OPENAI_BASE_URL")
-    if client is None:
-        client = OpenAI(api_key=api_key, base_url=base_url)
-    if aclient is None:
-        aclient = AsyncOpenAI(api_key=api_key, base_url=base_url)
-    return client, aclient
+    fp = _env_fingerprint(api_key, base_url)
+    with _clients_lock:
+        if client is None or aclient is None or _clients_env_fingerprint != fp:
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            aclient = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            _clients_env_fingerprint = fp
+        return client, aclient
 
 
 def retry_with_exponential_backoff(  # type: ignore
@@ -88,18 +108,26 @@ async def _throttled_openai_completion_acreate(
     max_tokens: int,
     top_p: float,
     limiter: aiolimiter.AsyncLimiter,
-) -> dict[str, Any]:
+) -> str:
+    """Return the completion text directly.
+
+    /stress A1.18 P1-3 (2026-05-16): pre-fix returned the raw SDK response
+    object on success but a chat-shaped dict (`{"choices": [{"message":
+    {"content": ""}}]}`) on fallback, while the caller indexed as
+    `x["choices"][0]["text"]`. Both branches now return a plain string.
+    """
     _, local_aclient = _require_openai_clients()
     async with limiter:
         for _ in range(3):
             try:
-                return await local_aclient.completions.create(
+                resp = await local_aclient.completions.create(
                     engine=engine,
                     prompt=prompt,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     top_p=top_p,
                 )
+                return resp.choices[0].text
             except openai.RateLimitError:
                 logging.warning(
                     "OpenAI API rate limit exceeded. Sleeping for 10 seconds."
@@ -108,7 +136,7 @@ async def _throttled_openai_completion_acreate(
             except openai.APIError as e:
                 logging.warning(f"OpenAI API error: {e}")
                 break
-        return {"choices": [{"message": {"content": ""}}]}
+        return ""
 
 
 async def agenerate_from_openai_completion(
@@ -148,7 +176,8 @@ async def agenerate_from_openai_completion(
         for prompt in prompts
     ]
     responses = await tqdm_asyncio.gather(*async_responses)
-    return [x["choices"][0]["text"] for x in responses]
+    # /stress A1.18 P1-3 (2026-05-16): throttler now returns str directly.
+    return list(responses)
 
 
 @retry_with_exponential_backoff
@@ -170,7 +199,8 @@ def generate_from_openai_completion(
         top_p=top_p,
         stop=[stop_token],
     )
-    answer: str = response["choices"][0]["text"]
+    # /stress A1.18 P1-3 (2026-05-16): SDK returns object, not dict.
+    answer: str = response.choices[0].text
     return answer
 
 
@@ -181,18 +211,25 @@ async def _throttled_openai_chat_completion_acreate(
     max_tokens: int,
     top_p: float,
     limiter: aiolimiter.AsyncLimiter,
-) -> dict[str, Any]:
+) -> str:
+    """Return the chat-completion text directly.
+
+    /stress A1.18 P1-3 (2026-05-16): pre-fix returned the raw SDK response on
+    success and a dict on fallback; caller indexed both as dicts. Both branches
+    now return a plain string.
+    """
     _, local_aclient = _require_openai_clients()
     async with limiter:
         for _ in range(3):
             try:
-                return await local_aclient.chat.completions.create(
+                resp = await local_aclient.chat.completions.create(
                     model=model,
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     top_p=top_p,
                 )
+                return resp.choices[0].message.content or ""
             except openai.RateLimitError:
                 logging.warning(
                     "OpenAI API rate limit exceeded. Sleeping for 10 seconds."
@@ -204,7 +241,7 @@ async def _throttled_openai_chat_completion_acreate(
             except openai.APIError as e:
                 logging.warning(f"OpenAI API error: {e}")
                 break
-        return {"choices": [{"message": {"content": ""}}]}
+        return ""
 
 
 async def agenerate_from_openai_chat_completion(
@@ -244,7 +281,8 @@ async def agenerate_from_openai_chat_completion(
         for message in messages_list
     ]
     responses = await tqdm_asyncio.gather(*async_responses)
-    return [x["choices"][0]["message"]["content"] for x in responses]
+    # /stress A1.18 P1-3 (2026-05-16): throttler now returns str directly.
+    return list(responses)
 
 
 @retry_with_exponential_backoff

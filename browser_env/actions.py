@@ -705,7 +705,10 @@ def create_upload_action(
     action = create_none_action()
     action.update(
         {
-            "action_type": ActionTypes.TYPE,
+            # /stress A1.18 P1-4 (2026-05-16): factory sets UPLOAD; pre-fix used
+            # ActionTypes.TYPE which made the UPLOAD branch in execute_action
+            # unreachable — upload tasks silently executed as text-entry.
+            "action_type": ActionTypes.UPLOAD,
             "element_id": element_id,
             "element_role": _role2id[element_role],
             "element_name": element_name,
@@ -946,8 +949,11 @@ async def aexecute_mouse_hover(left: float, top: float, page: APage) -> None:
     """Click at coordinates (left, top)."""
     viewport_size = page.viewport_size
     assert viewport_size
+    # /stress A1.18 P1-5 (2026-05-16): float() cast for NumPy 2.0 compat —
+    # async path was missed in commit 3f9ceca (only sync mouse_click/hover +
+    # upload + async mouse_click were cast).
     await page.mouse.move(
-        left * viewport_size["width"], top * viewport_size["height"]
+        float(left * viewport_size["width"]), float(top * viewport_size["height"])
     )
 
 
@@ -990,8 +996,9 @@ async def aexecute_upload(left: float, top: float, path: str, page: APage) -> No
     viewport_size = page.viewport_size
     assert viewport_size
     async with page.expect_file_chooser() as fc_info:
+        # /stress A1.18 P1-5 (2026-05-16): float() cast sibling propagation fix.
         await page.mouse.click(
-            left * viewport_size["width"], top * viewport_size["height"]
+            float(left * viewport_size["width"]), float(top * viewport_size["height"])
         )
     file_chooser = fc_info.value
     await file_chooser.set_files(path)
@@ -1425,9 +1432,20 @@ def execute_action(
 
 @beartype
 async def aexecute_action(
-    action: Action, page: APage, browser_ctx: ABrowserContext
+    action: Action,
+    page: APage,
+    browser_ctx: ABrowserContext,
+    obseration_processor: ObservationProcessor | None = None,
 ) -> APage:
-    """Execute the async action on the ChromeDriver."""
+    """Execute the async action on the ChromeDriver.
+
+    /stress A1.18 P1-4 (2026-05-16): added `obseration_processor` param. Pre-fix
+    the signature lacked it but the body referenced it at L1455 (CLEAR) and
+    L1572 (UPLOAD), causing `NameError` at runtime on async dispatch of those
+    actions. Async CLEAR / UPLOAD now also use truly async primitives
+    (`aexecute_mouse_click` / `aexecute_key_press`) instead of awaiting sync
+    counterparts.
+    """
     action_type = action["action_type"]
     match action_type:
         case ActionTypes.NONE:
@@ -1445,10 +1463,14 @@ async def aexecute_action(
             )
         case ActionTypes.CLEAR:
             element_id = action["element_id"]
+            if obseration_processor is None:
+                raise RuntimeError(
+                    "aexecute_action ActionTypes.CLEAR requires obseration_processor"
+                )
             element_center = obseration_processor.get_element_center(element_id)  # type: ignore[attr-defined]
-            await execute_mouse_click(element_center[0], element_center[1], page)
-            await execute_key_press("Meta+A", page)
-            await execute_key_press('Backspace', page)
+            await aexecute_mouse_click(element_center[0], element_center[1], page)
+            await aexecute_key_press("Meta+A", page)
+            await aexecute_key_press('Backspace', page)
         case ActionTypes.MOUSE_HOVER:
             await aexecute_mouse_hover(
                 action["coords"][0], action["coords"][1], page
@@ -1562,8 +1584,12 @@ async def aexecute_action(
                 )
         case ActionTypes.UPLOAD:
             element_id = action["element_id"]
+            if obseration_processor is None:
+                raise RuntimeError(
+                    "aexecute_action ActionTypes.UPLOAD requires obseration_processor"
+                )
             element_center = obseration_processor.get_element_center(element_id)  # type: ignore[attr-defined]
-            await aexecute_upload(element_center[0], element_center[1], action["text"], page)        
+            await aexecute_upload(element_center[0], element_center[1], action["text"], page)
         case _:
             raise ValueError(f"Unknown action type: {action_type}")
 

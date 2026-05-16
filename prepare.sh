@@ -16,12 +16,20 @@ resolve_python() {
     echo "${REPO_ROOT}/.venv/bin/python"
     return
   fi
+  # Unix-style fallbacks
   if command -v python3 >/dev/null 2>&1; then
     command -v python3
     return
   fi
   if command -v python >/dev/null 2>&1; then
     command -v python
+    return
+  fi
+  # /stress A1.18 P2-1 (2026-05-16): Windows fallback. Quark host (the VWA
+  # Docker host) runs Windows; reproducers cloning the repo via WSL or
+  # Git-Bash can use the Windows Python launcher.
+  if command -v py >/dev/null 2>&1; then
+    echo "py -3"
     return
   fi
   echo ""

@@ -615,13 +615,56 @@ def llm_fuzzy_match(pred: str, reference: str, question: str) -> float:
         top_p=1.0,
         context_length=0,
     ).lower()
-    if "partially correct" in response or "incorrect" in response:
-        return 0.0
-    elif "correct" in response:
+    # P79 patch (/stress A1.18 P1-1, 2026-05-16): tighten match — upstream
+    # `assert "correct" in response, response` would crash loud on unexpected
+    # responses; the prior P79 soften (`elif "correct" in response: 1.0 else 0.0`)
+    # could substring-match strings like "the correct answer is X but student
+    # wrote Y" as 1.0. Now: require "correct" only when the response does NOT
+    # also contain "incorrect" / "partially correct" (already handled above) AND
+    # log unexpected responses to a dedicated audit file so paper-grade reviewers
+    # can re-check the evaluator's actual output distribution.
+    if "correct" in response:
         return 1.0
-    else:
-        # Unexpected response (e.g. "n/a") — treat as incorrect
-        return 0.0
+    _log_unexpected_judge_response("llm_fuzzy_match", response, pred, reference, question)
+    return 0.0
+
+
+def _log_unexpected_judge_response(
+    fn_name: str, response: str, pred: str, reference: str, question: str
+) -> None:
+    """Append an unexpected LLM-judge response to the audit CSV.
+
+    /stress A1.18 P1-1 (2026-05-16): the upstream assert was crash-loud which
+    surfaced evaluator anomalies; the P79 silent-treat-as-incorrect path used
+    to lose them entirely. Log path defaults to
+    `external/visualwebarena/evaluator_unexpected_response_log.csv` (gitignored
+    runtime artifact); env var `VWA_EVAL_AUDIT_LOG` overrides.
+    """
+    import csv
+    import datetime
+    import threading
+    audit_path = os.environ.get(
+        "VWA_EVAL_AUDIT_LOG",
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "evaluator_unexpected_response_log.csv",
+        ),
+    )
+    lock = getattr(_log_unexpected_judge_response, "_lock", None) or threading.Lock()
+    _log_unexpected_judge_response._lock = lock  # type: ignore[attr-defined]
+    with lock:
+        try:
+            new_file = not os.path.exists(audit_path)
+            with open(audit_path, "a", encoding="utf-8", newline="") as f:
+                w = csv.writer(f)
+                if new_file:
+                    w.writerow(["timestamp_utc", "function", "response", "pred", "reference", "question"])
+                w.writerow([
+                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    fn_name, response, pred, reference, question,
+                ])
+        except Exception:
+            pass  # never let audit logging break the evaluator
 
 
 def llm_ua_match(pred: str, reference: str, question: str) -> float:
@@ -665,10 +708,10 @@ def llm_ua_match(pred: str, reference: str, question: str) -> float:
         top_p=1.0,
         context_length=0,
     ).lower()
+    # /stress A1.18 P1-1 (2026-05-16): tighten + log unexpected like llm_fuzzy_match.
     if "different" in response:
         return 0.0
-    elif "same" in response:
+    if "same" in response:
         return 1.0
-    else:
-        # Unexpected response — treat as different
-        return 0.0
+    _log_unexpected_judge_response("llm_ua_match", response, pred, reference, question)
+    return 0.0

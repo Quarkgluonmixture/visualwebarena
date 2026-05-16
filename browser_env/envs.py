@@ -140,9 +140,19 @@ class ScriptBrowserEnv(Env[dict[str, Observation], Action]):
     def setup(self, config_file: Path | None = None) -> None:
         self.context_manager = sync_playwright()
         self.playwright = self.context_manager.__enter__()
+        # P79 patch (/stress A1.18 P0-2, 2026-05-16): chromium launch args are
+        # env-driven so we don't leak private Tailscale IPs into committed code.
+        # Reproducers set VWA_CHROMIUM_LAUNCH_ARGS (space-separated, e.g.
+        # "--host-resolver-rules=MAP metis.lti.cs.cmu.edu YOUR_HOST_IP") to
+        # rewrite live-browser DNS to their own VWA Docker host. Default empty
+        # = no DNS override (assumes container hostnames resolve locally).
+        import os as _os
+        _launch_args = [
+            a for a in _os.environ.get("VWA_CHROMIUM_LAUNCH_ARGS", "").split() if a
+        ]
         self.browser = self.playwright.chromium.launch(
             headless=self.headless, slow_mo=self.slow_mo,
-            args=["--host-resolver-rules=MAP metis.lti.cs.cmu.edu 100.95.81.103"],
+            args=_launch_args,
         )
 
         if config_file:
