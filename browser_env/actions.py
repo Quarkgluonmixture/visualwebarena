@@ -652,16 +652,24 @@ def create_page_close_action() -> Action:
 def create_mouse_click_action(
     left: float | None = None, top: float | None = None
 ) -> Action:
-    """Return a valid action object with type COORD_CLICK."""
+    """Return a valid action object with type COORD_CLICK.
+
+    B-445 (/stress A1.25 P1-9-B* codex OOB, 2026-05-17): switched truthiness
+    test ``if left and top:`` → explicit ``is not None`` comparison. Pre-fix
+    a legitimate boundary coord ``(0, 0.5)`` raised ValueError, and ``(0, 0)``
+    was reclassified to id-based CLICK without an id (downstream error).
+    Vision-mode / coord-based agents can legitimately emit boundary
+    coordinates; the framework should not punish edge values asymmetrically.
+    """
     action = create_none_action()
-    if left and top:
+    if left is not None and top is not None:
         action.update(
             {
                 "action_type": ActionTypes.MOUSE_CLICK,
                 "coords": np.array([left, top], dtype=np.float32),
             }
         )
-    elif (not left) and (not top):
+    elif left is None and top is None:
         action.update(
             {
                 "action_type": ActionTypes.CLICK,
@@ -1399,7 +1407,25 @@ def execute_action(
             if action["pw_code"]:
                 parsed_code = parse_playwright_code(action["pw_code"])
                 locator_code = parsed_code[:-1]
-                execute_playwright_select_option(locator_code, page)
+                # B-446 (/stress A1.25 P0-7-B codex, 2026-05-17): pass the
+                # selected option value forward. Pre-fix `parsed_code[-1]
+                # ["arguments"]` was parsed but discarded → upstream
+                # `execute_playwright_select_option` called `locator.
+                # select_option()` with empty defaults → the chosen option
+                # was never applied. Combined with P79 `_select_option_meta.
+                # success=True` recording "JS dispatched" instead of "option
+                # matched" (vwa_wrapper.py:619-623), paper §3.5 select_option
+                # sub-taxonomy was completely unreliable. Now: extract args
+                # + kwargs from parsed `select_option(...)` call and pass
+                # forward so the option actually gets selected.
+                _final_call = parsed_code[-1] if parsed_code else {}
+                _so_args = list(_final_call.get("arguments", []) or [])
+                _so_kwargs = dict(_final_call.get("keywords", {}) or {})
+                execute_playwright_select_option(
+                    locator_code, page,
+                    pw_action_args=_so_args,
+                    pw_action_kwargs=_so_kwargs,
+                )
             else:
                 raise NotImplementedError(
                     "No proper locator found for select option action"
@@ -1688,7 +1714,18 @@ def create_playwright_action(playwright_code: str) -> Action:
         case "clear":
             return create_clear_action(pw_code=playwright_code)
         case "upload":
-            return create_upload_action(pw_code=playwright_code)
+            # B-447 (/stress A1.25 P0-8-B* codex OOB, 2026-05-17): extract
+            # text (file path) from the playwright code string. Pre-fix
+            # `create_upload_action(pw_code=playwright_code)` was missing
+            # the required `text` arg → TypeError at action creation time
+            # if any caller ever exercised this branch. Combined with the
+            # id-based `case "upload"` regex bug (line 1774-1776 below)
+            # this made the upload action path doubly dead. Extract text
+            # via the same regex pattern playwright fill/type uses.
+            _u_p = r'upload\((?:"|\')(.+?)(?:"|\')\)'
+            _u_match = re.search(_u_p, playwright_code)
+            _u_text = _u_match.group(1) if _u_match else ""
+            return create_upload_action(text=_u_text, pw_code=playwright_code)
         case "hover":
             return create_hover_action(pw_code=playwright_code)
         case "type" | "fill":
@@ -1767,15 +1804,22 @@ def create_id_based_action(action_str: str) -> Action:
             element_id = match.group(1)
             return create_clear_action(element_id=element_id)
         case "upload":
+            # B-447 (/stress A1.25 P0-8-B* codex OOB, 2026-05-17): regex
+            # literally matched `type` not `upload` — id-based upload
+            # action_str format `upload [42] [/path/to/file] [flag]` never
+            # matched → ActionParsingError raised on every upload call.
+            # Combined with the playwright-code branch bug above, upload
+            # was doubly dead in upstream framework. Regex anchor changed
+            # to `upload` to actually match the id-based format.
             # add default enter flag
             if not (action_str.endswith("[0]") or action_str.endswith("[1]")):
                 action_str += " [1]"
 
             match = re.search(
-                r"type ?\[(\d+)\] ?\[(.+)\] ?\[(\d+)\]", action_str
+                r"upload ?\[(\d+)\] ?\[(.+)\] ?\[(\d+)\]", action_str
             )
             if not match:
-                raise ActionParsingError(f"Invalid type action {action_str}")
+                raise ActionParsingError(f"Invalid upload action {action_str}")
             element_id, text, enter_flag = (
                 match.group(1),
                 match.group(2),
