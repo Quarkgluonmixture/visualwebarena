@@ -615,14 +615,22 @@ def llm_fuzzy_match(pred: str, reference: str, question: str) -> float:
         top_p=1.0,
         context_length=0,
     ).lower()
-    # P79 patch (/stress A1.18 P1-1, 2026-05-16): tighten match — upstream
-    # `assert "correct" in response, response` would crash loud on unexpected
-    # responses; the prior P79 soften (`elif "correct" in response: 1.0 else 0.0`)
-    # could substring-match strings like "the correct answer is X but student
-    # wrote Y" as 1.0. Now: require "correct" only when the response does NOT
-    # also contain "incorrect" / "partially correct" (already handled above) AND
-    # log unexpected responses to a dedicated audit file so paper-grade reviewers
-    # can re-check the evaluator's actual output distribution.
+    # P79 patch (/stress A1.25 GRL Chunk 4 P0-1-B* codex OOB, 2026-05-17):
+    # invert check order — pre-fix `if "correct" in response: return 1.0`
+    # substring-matched "incorrect" / "partially correct" / "not correct"
+    # all as 1.0 (monkeypatch-verified). This was a long-standing upstream
+    # VWA polarity bug inherited from `89f5af2` baseline; B-91 (f0c835b)
+    # only guarded empty predictions, NOT this substring-polarity bug.
+    # Per user direction 2026-05-17: P79 patches upstream evaluator bugs
+    # + discloses divergence (same precedent as B-91); strict negative-first
+    # check with no ambiguous middle (fail-closed on unrecognized response).
+    # Same disclosure pattern in paper §3.5.1 (P79 evaluator patch policy).
+    if (
+        "incorrect" in response
+        or "partially correct" in response
+        or "not correct" in response
+    ):
+        return 0.0
     if "correct" in response:
         return 1.0
     _log_unexpected_judge_response("llm_fuzzy_match", response, pred, reference, question)
@@ -709,7 +717,15 @@ def llm_ua_match(pred: str, reference: str, question: str) -> float:
         context_length=0,
     ).lower()
     # /stress A1.18 P1-1 (2026-05-16): tighten + log unexpected like llm_fuzzy_match.
-    if "different" in response:
+    # B-535 sibling (/stress A1.25 GRL Chunk 4 P0-1-B* codex OOB, 2026-05-17):
+    # `"different"` substring catches the common negative phrase but missed
+    # `"not the same"` which substring-matches `"same"` → 1.0 (monkeypatch-
+    # verified). Extend negative-first to cover both phrasings.
+    if (
+        "different" in response
+        or "not the same" in response
+        or "not same" in response
+    ):
         return 0.0
     if "same" in response:
         return 1.0

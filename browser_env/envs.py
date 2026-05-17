@@ -142,13 +142,21 @@ class ScriptBrowserEnv(Env[dict[str, Observation], Action]):
         self.playwright = self.context_manager.__enter__()
         # P79 patch (/stress A1.18 P0-2, 2026-05-16): chromium launch args are
         # env-driven so we don't leak private Tailscale IPs into committed code.
-        # Reproducers set VWA_CHROMIUM_LAUNCH_ARGS (space-separated, e.g.
-        # "--host-resolver-rules=MAP metis.lti.cs.cmu.edu YOUR_HOST_IP") to
-        # rewrite live-browser DNS to their own VWA Docker host. Default empty
-        # = no DNS override (assumes container hostnames resolve locally).
+        # B-540 (/stress A1.25 GRL Chunk 4 P1-4-B* codex OOB, 2026-05-17):
+        # use `shlex.split` instead of `.split()` so multi-word args stay
+        # together when quoted. Pre-fix `.split()` split
+        # `--host-resolver-rules=MAP metis.lti.cs.cmu.edu YOUR_IP` into three
+        # argv items but Chromium expects the whole rule (incl spaces) as ONE
+        # argv entry. Off-host reproducers following the documented example
+        # got broken chromium args silently. Post-fix: reproducers should
+        # quote the value, e.g.
+        #   VWA_CHROMIUM_LAUNCH_ARGS='--host-resolver-rules="MAP metis.lti.cs.cmu.edu YOUR_HOST_IP"'
+        # `shlex.split` honors the quoting → Chromium receives the rule as
+        # one argv item. Default empty = no DNS override.
         import os as _os
+        import shlex as _shlex
         _launch_args = [
-            a for a in _os.environ.get("VWA_CHROMIUM_LAUNCH_ARGS", "").split() if a
+            a for a in _shlex.split(_os.environ.get("VWA_CHROMIUM_LAUNCH_ARGS", "")) if a
         ]
         self.browser = self.playwright.chromium.launch(
             headless=self.headless, slow_mo=self.slow_mo,

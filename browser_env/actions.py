@@ -721,7 +721,18 @@ def create_upload_action(
             "element_role": _role2id[element_role],
             "element_name": element_name,
             "nth": nth,
-            "text": _keys2ids(text),
+            # B-539 (/stress A1.25 GRL Chunk 4 P1-3-B* codex OOB, 2026-05-17):
+            # do NOT key-encode the upload `text` field. Pre-fix
+            # `_keys2ids(text)` converted "/path/to/file.png" into a list of
+            # integer key codes, which `execute_upload` at line 1442-1445 then
+            # passed to Playwright `file_chooser.set_files(path)` as the path
+            # argument — `set_files()` expects str or list[str], not list[int],
+            # so upload was type-corrupted at runtime even after B-447 parser /
+            # factory fixes. Per CLAUDE.md: upload field semantics is "file
+            # path string", not "sequence of key presses"; preserve the raw
+            # path. New `file_path` field added for executor lookup clarity.
+            "text": text,
+            "file_path": text,
             "pw_code": pw_code,
         }
     )
@@ -1594,7 +1605,23 @@ async def aexecute_action(
             if action["pw_code"]:
                 parsed_code = parse_playwright_code(action["pw_code"])
                 locator_code = parsed_code[:-1]
-                await aexecute_playwright_select_option(locator_code, page)
+                # B-538 (/stress A1.25 GRL Chunk 4 P1-2-B* codex OOB, 2026-05-17):
+                # sibling-propagation of B-446 (sync branch fix at line 1406-1428).
+                # Pre-fix async branch dropped `parsed_code[-1]["arguments"]` →
+                # `aexecute_playwright_select_option(locator_code, page)` called
+                # `locator.select_option()` with no option → silent no-op upstream
+                # contract violation. Async sibling now mirrors sync extraction
+                # via `pw_action_args` / `pw_action_kwargs`. Note P79 primarily
+                # uses sync path; this is upstream-contract preservation for raw
+                # VWA reproducers / future async migration.
+                _final_call = parsed_code[-1] if parsed_code else {}
+                _so_args = list(_final_call.get("arguments", []) or [])
+                _so_kwargs = dict(_final_call.get("keywords", {}) or {})
+                await aexecute_playwright_select_option(
+                    locator_code, page,
+                    pw_action_args=_so_args,
+                    pw_action_kwargs=_so_kwargs,
+                )
             else:
                 raise NotImplementedError(
                     "No proper locator found for select option action"
@@ -1811,22 +1838,33 @@ def create_id_based_action(action_str: str) -> Action:
             # Combined with the playwright-code branch bug above, upload
             # was doubly dead in upstream framework. Regex anchor changed
             # to `upload` to actually match the id-based format.
-            # add default enter flag
+            # B-539 (/stress A1.25 GRL Chunk 4 P1-3-B* codex OOB, 2026-05-17):
+            # remove enter-flag semantics from upload. Pre-fix `text += "\n"`
+            # appended a newline to the file path string when enter_flag == "1",
+            # producing paths like "/tmp/foo.png\n" — Playwright `set_files()`
+            # treated this as a non-existent path. Upload action's enter-flag
+            # was a copy-paste from `type` action parser where Enter submits
+            # forms; for `upload`, the file-chooser is the only side effect
+            # and there is no analogous "submit" semantic. Default flag is
+            # retained for parser back-compat (treats `upload [id] [path]`
+            # identical to `upload [id] [path] [0]`); flag value is now
+            # ignored on upload-only path.
             if not (action_str.endswith("[0]") or action_str.endswith("[1]")):
-                action_str += " [1]"
+                action_str += " [0]"
 
             match = re.search(
                 r"upload ?\[(\d+)\] ?\[(.+)\] ?\[(\d+)\]", action_str
             )
             if not match:
                 raise ActionParsingError(f"Invalid upload action {action_str}")
-            element_id, text, enter_flag = (
+            element_id, text, _enter_flag_ignored = (
                 match.group(1),
                 match.group(2),
                 match.group(3),
             )
-            if enter_flag == "1":
-                text += "\n"
+            # B-539: do NOT append "\n" to upload text; file-chooser semantics
+            # has no submit-Enter analog. _enter_flag_ignored kept for parser
+            # back-compat (caller may still pass the [0/1] suffix).
             return create_upload_action(text=text, element_id=element_id)
         case "hover":
             match = re.search(r"hover ?\[(\d+)\]", action_str)
