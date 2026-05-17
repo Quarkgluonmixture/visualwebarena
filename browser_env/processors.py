@@ -16,6 +16,7 @@ import requests
 from gymnasium import spaces
 from PIL import Image, ImageDraw, ImageFont
 from playwright.sync_api import CDPSession, Page, ViewportSize
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from browser_env.constants import (
     ASCII_CHARSET,
@@ -1139,8 +1140,19 @@ class ImageObservationProcessor(ObservationProcessor):
                 self.meta_data["obs_nodes_info"] = id2center
                 screenshot_som = np.array(bbox_img)
                 return screenshot_som, content_str
-            except:
-                page.wait_for_event("load")
+            except Exception as primary_err:
+                # /stress A1.18-re (B-586 P1-7-B codex, 2026-05-17): bounded
+                # retry — pre-fix `page.wait_for_event("load")` had no timeout,
+                # so a post-load screenshot failure caused indefinite hang on
+                # pages where no subsequent load event fires. Bounded
+                # wait_for_load_state replaces the unbounded event wait.
+                self.meta_data["screenshot_primary_error"] = (
+                    f"{type(primary_err).__name__}: {primary_err}"
+                )
+                try:
+                    page.wait_for_load_state("load", timeout=5000)
+                except PlaywrightTimeoutError:
+                    self.meta_data["screenshot_retry_timeout"] = True
                 screenshot_bytes = page.screenshot()
                 som_bboxes = self.get_page_bboxes(page)
                 screenshot_img = Image.open(BytesIO(screenshot_bytes))
@@ -1156,8 +1168,16 @@ class ImageObservationProcessor(ObservationProcessor):
         else:
             try:
                 screenshot = png_bytes_to_numpy(page.screenshot())
-            except:
-                page.wait_for_event("load")
+            except Exception as primary_err:
+                # /stress A1.18-re (B-586 P1-7-B codex, 2026-05-17): same
+                # bounded retry pattern for non-SoM screenshot path.
+                self.meta_data["screenshot_primary_error"] = (
+                    f"{type(primary_err).__name__}: {primary_err}"
+                )
+                try:
+                    page.wait_for_load_state("load", timeout=5000)
+                except PlaywrightTimeoutError:
+                    self.meta_data["screenshot_retry_timeout"] = True
                 screenshot = png_bytes_to_numpy(page.screenshot())
             return screenshot, ""
 
@@ -1275,10 +1295,34 @@ class ObservationHandler:
         # causing AXTree (DOM/SoM text) to be captured pre-networkidle while
         # screenshot (Vision/SoM image) was post-networkidle — a silent
         # cross-mode timing confound on the §1 phantom-vs-baseline claim.
+        #
+        # /stress A1.18-re (B-587 P1-8-B codex, 2026-05-17): record barrier
+        # outcome (ok / elapsed_ms / exception_type) into per-processor meta so
+        # the upstream runner can mark `needs_reevaluation` after repeated
+        # barrier misses. Pre-fix the bare `except Exception: pass` silently
+        # absorbed networkidle timeouts on high-latency Magento / reddit pages,
+        # turning infrastructure timing variance into model SR variance with no
+        # observability hook.
+        import time as _time
+        _barrier_start = _time.monotonic()
+        _barrier_ok = True
+        _barrier_exc: str | None = None
         try:
             page.wait_for_load_state("networkidle", timeout=2000)
-        except Exception:
-            pass
+        except PlaywrightTimeoutError as e:
+            _barrier_ok = False
+            _barrier_exc = f"PlaywrightTimeoutError: {e}"
+        except Exception as e:
+            _barrier_ok = False
+            _barrier_exc = f"{type(e).__name__}: {e}"
+        _barrier_elapsed_ms = (_time.monotonic() - _barrier_start) * 1000.0
+        _barrier_meta = {
+            "networkidle_ok": _barrier_ok,
+            "networkidle_elapsed_ms": _barrier_elapsed_ms,
+            "networkidle_exception_type": _barrier_exc,
+        }
+        self.text_processor.meta_data.update(_barrier_meta)
+        self.image_processor.meta_data.update(_barrier_meta)
         text_obs = self.text_processor.process(page)
         image_obs, content_str = self.image_processor.process(page)
         if content_str != "":

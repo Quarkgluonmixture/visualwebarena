@@ -58,9 +58,13 @@ def retry_with_exponential_backoff(  # type: ignore
     exponential_base: float = 2,
     jitter: bool = True,
     max_retries: int = 3,
+    # /stress A1.18-re (B-585 P1-6-B codex, 2026-05-17): drop BadRequestError
+    # from retryable — it is almost always non-transient (invalid payload,
+    # context-window overflow, unsupported model). Retrying it delays the run
+    # AND destroys forensic signal needed to distinguish model-context overflow
+    # from endpoint outage. Keep RateLimit + InternalServerError (transient).
     errors: tuple[Any] = (
         openai.RateLimitError,
-        openai.BadRequestError,
         openai.InternalServerError,
     ),
 ):
@@ -70,6 +74,7 @@ def retry_with_exponential_backoff(  # type: ignore
         # Initialize variables
         num_retries = 0
         delay = initial_delay
+        last_error: Exception | None = None
 
         # Loop until a successful response or max_retries is hit or an exception is raised
         while True:
@@ -81,12 +86,19 @@ def retry_with_exponential_backoff(  # type: ignore
             except errors as e:
                 # Increment retries
                 num_retries += 1
+                last_error = e
 
                 # Check if max retries has been reached
                 if num_retries > max_retries:
-                    raise Exception(
-                        f"Maximum number of retries ({max_retries}) exceeded."
-                    )
+                    # /stress A1.18-re B-585: preserve original cause chain so
+                    # forensic info (status code, request_id, error type) is
+                    # available to the caller. Pre-fix raised a bare
+                    # Exception("Maximum number of retries (N) exceeded") with
+                    # no traceback link to the underlying API error.
+                    raise RuntimeError(
+                        f"Maximum number of retries ({max_retries}) exceeded "
+                        f"(last error: {type(e).__name__}: {e})"
+                    ) from e
 
                 # Increment the delay
                 delay *= exponential_base * (1 + jitter * random.random())
@@ -117,6 +129,7 @@ async def _throttled_openai_completion_acreate(
     `x["choices"][0]["text"]`. Both branches now return a plain string.
     """
     _, local_aclient = _require_openai_clients()
+    last_error: Exception | None = None
     async with limiter:
         for _ in range(3):
             try:
@@ -128,15 +141,26 @@ async def _throttled_openai_completion_acreate(
                     top_p=top_p,
                 )
                 return resp.choices[0].text
-            except openai.RateLimitError:
+            except openai.RateLimitError as e:
                 logging.warning(
                     "OpenAI API rate limit exceeded. Sleeping for 10 seconds."
                 )
+                last_error = e
                 await asyncio.sleep(10)
             except openai.APIError as e:
                 logging.warning(f"OpenAI API error: {e}")
+                last_error = e
                 break
-        return ""
+        # /stress A1.18-re (B-584 P1-5-B codex, 2026-05-17): fail-loud instead
+        # of silent empty-string return. Pre-fix returned "" after rate-limit
+        # exhaustion or APIError → indistinguishable from legitimate empty model
+        # output → evaluator/judge/agent path consumed it as measured model
+        # behavior, corrupting SR + error taxonomy. Per user direction
+        # 2026-05-17 Q2=A: surface infrastructure failure rather than mask it.
+        raise RuntimeError(
+            f"OpenAI completion API failed after 3 attempts "
+            f"(last error: {type(last_error).__name__ if last_error else 'unknown'}: {last_error})"
+        ) from last_error
 
 
 async def agenerate_from_openai_completion(
@@ -219,6 +243,7 @@ async def _throttled_openai_chat_completion_acreate(
     now return a plain string.
     """
     _, local_aclient = _require_openai_clients()
+    last_error: Exception | None = None
     async with limiter:
         for _ in range(3):
             try:
@@ -230,18 +255,26 @@ async def _throttled_openai_chat_completion_acreate(
                     top_p=top_p,
                 )
                 return resp.choices[0].message.content or ""
-            except openai.RateLimitError:
+            except openai.RateLimitError as e:
                 logging.warning(
                     "OpenAI API rate limit exceeded. Sleeping for 10 seconds."
                 )
+                last_error = e
                 await asyncio.sleep(10)
-            except asyncio.exceptions.TimeoutError:
+            except asyncio.exceptions.TimeoutError as e:
                 logging.warning("OpenAI API timeout. Sleeping for 10 seconds.")
+                last_error = e
                 await asyncio.sleep(10)
             except openai.APIError as e:
                 logging.warning(f"OpenAI API error: {e}")
+                last_error = e
                 break
-        return ""
+        # /stress A1.18-re (B-584 sibling P1-5-B codex, 2026-05-17): fail-loud
+        # — see _throttled_openai_completion_acreate above for rationale.
+        raise RuntimeError(
+            f"OpenAI chat completion API failed after 3 attempts "
+            f"(last error: {type(last_error).__name__ if last_error else 'unknown'}: {last_error})"
+        ) from last_error
 
 
 async def agenerate_from_openai_chat_completion(

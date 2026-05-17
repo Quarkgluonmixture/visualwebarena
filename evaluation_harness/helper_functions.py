@@ -1,6 +1,7 @@
 """Implements helper functions to assist evaluation cases where other evaluators are not suitable."""
 import json
 import os
+import threading
 from datetime import datetime, timezone
 from typing import Any, Union
 from urllib.parse import urlparse
@@ -9,6 +10,12 @@ import requests
 from beartype import beartype
 from beartype.typing import Dict, List
 from playwright.sync_api import CDPSession, Page
+
+# /stress A1.18-re (B-583 P1-4-A* Claude OOB, 2026-05-17): module-level audit
+# log lock replaces TOCTOU getattr/setattr lazy-init at L660-662 (pre-fix two
+# concurrent first-call threads could each create a fresh lock instance before
+# last-writer-wins store → race window during initial contention only).
+_AUDIT_LOG_LOCK = threading.Lock()
 
 from browser_env.env_config import (
     ACCOUNTS,
@@ -615,23 +622,16 @@ def llm_fuzzy_match(pred: str, reference: str, question: str) -> float:
         top_p=1.0,
         context_length=0,
     ).lower()
-    # P79 patch (/stress A1.25 GRL Chunk 4 P0-1-B* codex OOB, 2026-05-17):
-    # invert check order — pre-fix `if "correct" in response: return 1.0`
-    # substring-matched "incorrect" / "partially correct" / "not correct"
-    # all as 1.0 (monkeypatch-verified). This was a long-standing upstream
-    # VWA polarity bug inherited from `89f5af2` baseline; B-91 (f0c835b)
-    # only guarded empty predictions, NOT this substring-polarity bug.
-    # Per user direction 2026-05-17: P79 patches upstream evaluator bugs
-    # + discloses divergence (same precedent as B-91); strict negative-first
-    # check with no ambiguous middle (fail-closed on unrecognized response).
-    # Same disclosure pattern in paper §3.5.1 (P79 evaluator patch policy).
-    if (
-        "incorrect" in response
-        or "partially correct" in response
-        or "not correct" in response
-    ):
+    # /stress A1.18-re (B-591 P1-12-A Claude, 2026-05-17): tighten substring
+    # matches to startswith on stripped response — pre-fix `if "correct" in
+    # response` substring-matched verbose responses like "the correctness of
+    # this answer is unclear" (returned 1.0 wrongly). Compose with B-535
+    # negative-first invert. Prompt L598 already constrains model to output only
+    # 'correct' / 'incorrect' / 'partially correct'; startswith is safe.
+    resp = response.strip()
+    if resp.startswith(("incorrect", "partially correct", "not correct")):
         return 0.0
-    if "correct" in response:
+    if resp.startswith("correct"):
         return 1.0
     _log_unexpected_judge_response("llm_fuzzy_match", response, pred, reference, question)
     return 0.0
@@ -650,7 +650,6 @@ def _log_unexpected_judge_response(
     """
     import csv
     import datetime
-    import threading
     audit_path = os.environ.get(
         "VWA_EVAL_AUDIT_LOG",
         os.path.join(
@@ -658,9 +657,10 @@ def _log_unexpected_judge_response(
             "evaluator_unexpected_response_log.csv",
         ),
     )
-    lock = getattr(_log_unexpected_judge_response, "_lock", None) or threading.Lock()
-    _log_unexpected_judge_response._lock = lock  # type: ignore[attr-defined]
-    with lock:
+    # /stress A1.18-re B-583: module-level _AUDIT_LOG_LOCK at file top (replaces
+    # prior getattr/setattr TOCTOU lazy-init that race-windowed concurrent first
+    # calls).
+    with _AUDIT_LOG_LOCK:
         try:
             new_file = not os.path.exists(audit_path)
             with open(audit_path, "a", encoding="utf-8", newline="") as f:
@@ -716,18 +716,14 @@ def llm_ua_match(pred: str, reference: str, question: str) -> float:
         top_p=1.0,
         context_length=0,
     ).lower()
-    # /stress A1.18 P1-1 (2026-05-16): tighten + log unexpected like llm_fuzzy_match.
-    # B-535 sibling (/stress A1.25 GRL Chunk 4 P0-1-B* codex OOB, 2026-05-17):
-    # `"different"` substring catches the common negative phrase but missed
-    # `"not the same"` which substring-matches `"same"` → 1.0 (monkeypatch-
-    # verified). Extend negative-first to cover both phrasings.
-    if (
-        "different" in response
-        or "not the same" in response
-        or "not same" in response
-    ):
+    # /stress A1.18-re (B-591 sibling P1-12-A, 2026-05-17): startswith tighten
+    # mirrors llm_fuzzy_match. B-535 negative-first invert preserved. Prompt
+    # L693-699 constrains model to output only 'same' / 'different'; startswith
+    # is safe against borderline verbose phrasings.
+    resp = response.strip()
+    if resp.startswith(("different", "not the same", "not same")):
         return 0.0
-    if "same" in response:
+    if resp.startswith("same"):
         return 1.0
     _log_unexpected_judge_response("llm_ua_match", response, pred, reference, question)
     return 0.0

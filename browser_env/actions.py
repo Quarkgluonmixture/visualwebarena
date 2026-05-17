@@ -264,7 +264,22 @@ def action2create_function(action: Action) -> str:
             return f"create_clear_action({args_str})"
         case ActionTypes.UPLOAD:
             args = []
-            text = "".join(map(lambda x: _id2key[x], action["text"]))
+            # /stress A1.18-re (B-582 P1-3-B codex, 2026-05-17): A1.25 GRL
+            # Chunk 1 (B-447) made `create_upload_action` store raw `text` /
+            # `file_path` strings (file path, not key-id encoding) but this
+            # round-trip serializer still applied `_id2key` mapping, producing
+            # a garbled `create_upload_action(text='...')` call string on
+            # replay/export/debug. Use the raw string directly for UPLOAD; the
+            # `_id2key` path remains correct for TYPE / CLEAR which still
+            # encode text as int key-id list.
+            raw_text = action["text"]
+            if isinstance(raw_text, list):
+                # legacy archive path: int-list key-encoding from pre-B-447
+                # captures. Decode for backward compatibility with archived
+                # action traces.
+                text = "".join(map(lambda x: _id2key[x], raw_text))
+            else:
+                text = raw_text
             args.append(f"text={repr(text)}")
             args.append(f"element_id={repr(action['element_id'])}")
             args.append(
@@ -541,6 +556,16 @@ def create_mouse_hover_action(
     left: float | None = None, top: float | None = None
 ) -> Action:
     """Return a valid action object with type COORD_CLICK."""
+    # /stress A1.18-re (B-596 P2-5-B codex, 2026-05-17): mirror the B-445
+    # `is not None` contract from create_mouse_click_action. Pre-fix accepted
+    # half-coord `(None, 0.5)` which produced an `np.float32(NaN)` element
+    # only crashing at runtime in playwright dispatch — failure point too far
+    # from caller for clean attribution. Boundary `(0, 0)` remains valid.
+    if left is None or top is None:
+        raise ValueError(
+            "create_mouse_hover_action requires both `left` and `top`; "
+            f"got left={left!r}, top={top!r}"
+        )
     action = create_none_action()
     action.update(
         {
