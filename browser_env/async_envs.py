@@ -134,13 +134,41 @@ class AsyncScriptBrowserEnv(Env[npt.NDArray[np.uint8], Action]):
         except Exception as e:
             fail_error = str(e)
 
+        # Fire-6 RCA Stage C1b (/stress 2026-05-20): screenshot-timeout recovery.
+        # On a heavy DOM page (e.g. cls edit form, 154KB DOM / 2582 inline city
+        # options) Page.screenshot can exceed the 30s timeout. content() (the
+        # DOM/AXTree source that text-observation modes need) is captured FIRST;
+        # the screenshot is image-observation only. Rather than raise — which
+        # quarantines the whole episode (Fire-4 task 75 agent_observation
+        # Page.screenshot timeout) — recover a blank placeholder + flag so the
+        # P79 wrapper can decide fatality by observation_mode (dom = artifact-
+        # only → non-fatal; som/vision = decision-input → wrapper re-raises).
+        # Mode-AGNOSTIC here by design: the wrapper is the single mode-gating
+        # chokepoint. The screenshot is still ATTEMPTED every step (latency
+        # comparability across modes preserved); only the rare timeout degrades.
+        screenshot_timeout_recovered = False
         try:
             content = await self.page.content()
             screenshot = png_bytes_to_numpy(await self.page.screenshot())
-        except:
-            await self.page.wait_for_load_state("load")
-            content = await self.page.content()
-            screenshot = png_bytes_to_numpy(await self.page.screenshot())
+        except Exception:
+            try:
+                await self.page.wait_for_load_state("load")
+                content = await self.page.content()
+                screenshot = png_bytes_to_numpy(await self.page.screenshot())
+            except Exception:
+                screenshot_timeout_recovered = True
+                try:
+                    content = await self.page.content()
+                except Exception:
+                    content = ""
+                screenshot = np.zeros(
+                    (
+                        self.viewport_size["height"],
+                        self.viewport_size["width"],
+                        4,
+                    ),
+                    dtype=np.uint8,
+                )
 
         return (
             screenshot,
@@ -150,6 +178,7 @@ class AsyncScriptBrowserEnv(Env[npt.NDArray[np.uint8], Action]):
             {
                 "page": DetachedPage(self.page.url, content),
                 "fail_error": fail_error,
+                "screenshot_timeout_recovered": screenshot_timeout_recovered,
             },
         )
 
